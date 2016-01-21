@@ -780,8 +780,8 @@ render(FreeTypeInstance *ft, Layout *text, const FontRenderMode *mode,
     top = offset->y;
     for (n = 0; n < length; ++n) {
         image = slots[n].glyph->image;
-        x = FX6_TRUNC(FX6_CEIL(left + slots[n].posn.x));
-        y = FX6_TRUNC(FX6_CEIL(top + slots[n].posn.y));
+        x = FX6_TRUNC(FX6_CEIL(left + slots[n].posn.x + slots[n].offset.x));
+        y = FX6_TRUNC(FX6_CEIL(top + slots[n].posn.y - slots[n].offset.y));
         if (image->bitmap.pixel_mode == FT_PIXEL_MODE_GRAY) {
             render_gray(x, y, surface, &(image->bitmap), fg_color);
             is_underline_gray = 1;
