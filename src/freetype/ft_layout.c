@@ -26,6 +26,7 @@
 #include FT_OUTLINE_H
 #include FT_BITMAP_H
 #include FT_CACHE_H
+#include <raqm.h>
 
 /* Multiply the font's x ppem by this factor to get the x strength
  * factor in 16.16 Fixed.
@@ -84,7 +85,7 @@ static const FT_UInt16 GLYPH_STYLE_FLAGS = (FT_STYLE_OBLIQUE |
 
 static FT_UInt32 get_load_flags(const FontRenderMode *);
 static void fill_metrics(FontMetrics *, FT_Pos, FT_Pos,
-                         FT_Vector *, FT_Vector *);
+                         FT_Vector *);
 static void fill_context(TextContext *,
                          const FreeTypeInstance *,
                          const PgFontObject *,
@@ -194,48 +195,60 @@ size_text(Layout *ftext,
     Py_ssize_t string_length = PGFT_String_GET_LENGTH(text);
     const PGFT_char *chars = PGFT_String_GET_DATA(text);
     FT_Fixed y_scale = sz_metrics->y_scale;
-    int have_kerning = FT_HAS_KERNING(font);
-    Py_ssize_t length = 0;
     GlyphSlot *slots;
-    GlyphIndex_t id;
-    GlyphIndex_t prev_id = 0;
-    FT_UInt32 ch;
     Py_ssize_t i;
-    FT_Error error = 0;
+    FT_Angle rotation_angle = ftext->mode.rotation_angle;
+    int vertical = ftext->mode.render_flags & FT_RFLAG_VERTICAL;
+    raqm_t *rq;
+    raqm_glyph_t *glyphs;
+    size_t  nglyphs;
 
-    assert(!(ftext->mode.render_flags & FT_RFLAG_KERNING) || have_kerning);
+    rq = raqm_create();
+    if (!rq)
+        goto cleanup;
+    if (!raqm_set_text(rq, chars, string_length))
+        goto cleanup;
+    if (!raqm_set_freetype_face(rq, font))
+        goto cleanup;
+    if (!raqm_set_par_direction(rq, vertical? RAQM_DIRECTION_TTB : RAQM_DIRECTION_DEFAULT))
+        goto cleanup;
+    if (!raqm_layout(rq))
+        goto cleanup;
+
+    glyphs = raqm_get_glyphs(rq, &nglyphs);
+    if (!glyphs)
+        goto cleanup;
 
     /* create the text struct */
-    if (string_length > ftext->buffer_size) {
+    if (nglyphs > ftext->buffer_size) {
         _PGFT_free(ftext->glyphs);
         ftext->glyphs = (GlyphSlot *)
-            _PGFT_malloc((size_t)string_length * sizeof(GlyphSlot));
+            _PGFT_malloc((size_t) nglyphs * sizeof(GlyphSlot));
         if (!ftext->glyphs) {
             PyErr_NoMemory();
-            return -1;
+            goto cleanup;
         }
-        ftext->buffer_size = string_length;
+        ftext->buffer_size = nglyphs;
     }
 
     /* Retrieve the glyph indices of recognized text characters */
     slots = ftext->glyphs;
-    for (i = 0; i < string_length; ++i) {
-        ch = chars[i];
-        id = FTC_CMapCache_Lookup(context->charmap, context->id, -1, ch);
-        slots[length].id = id;
-        if (have_kerning) {
-            error = FT_Get_Kerning(font, prev_id, id, FT_KERNING_UNFITTED,
-                                   &slots[length].kerning);
-            if (error) {
-                _PGFT_SetError(ft, "Loading glyphs", error);
-                PyErr_SetString(PyExc_SDLError, _PGFT_GetError(ft));
-                return -1;
-            }
+    for (i = 0; i < nglyphs; ++i) {
+        slots[i].id = glyphs[i].index;
+        slots[i].offset.x = glyphs[i].x_offset;
+        slots[i].offset.y = glyphs[i].y_offset;
+        slots[i].h_advance.x = glyphs[i].x_advance;
+        slots[i].h_advance.y = 0;
+        slots[i].v_advance.x = 0;
+        slots[i].v_advance.y = glyphs[i].y_advance;
+        if (rotation_angle != 0) {
+            FT_Vector_Rotate(&slots[i].offset, rotation_angle);
+            FT_Vector_Rotate(&slots[i].h_advance, rotation_angle);
+            FT_Vector_Rotate(&slots[i].v_advance, rotation_angle);
         }
-        prev_id = id;
-        ++length;
     }
-    ftext->length = length;
+    ftext->length = nglyphs;
+    raqm_destroy(rq);
 
     /* Fill in generate font parameters */
     ftext->ascender = sz_metrics->ascender;
@@ -251,6 +264,12 @@ size_text(Layout *ftext,
                                           FX16_ONE + bold_str / 4);
     }
     return 0;
+    /*
+     * Cleanup on error
+     */
+cleanup:
+    raqm_destroy(rq);
+    return -1;
 }
 
 static int
@@ -285,17 +304,8 @@ position_glyphs(Layout *ftext)
     FontMetrics *metrics;
 
     FT_Vector   pen = {0, 0};                /* untransformed origin  */
-    FT_Vector   pen1 = {0, 0};
-    FT_Vector   pen2;
-
     int         vertical = ftext->mode.render_flags & FT_RFLAG_VERTICAL;
-    int         use_kerning = ftext->mode.render_flags & FT_RFLAG_KERNING;
-
-    /* All these are 16.16 precision */
-    FT_Angle    rotation_angle = ftext->mode.rotation_angle;
-
-    /* All these are 26.6 precision */
-    FT_Vector   kerning;
+   /* All these are 26.6 precision */
     FT_Pos      min_x = FX6_MAX;
     FT_Pos      max_x = FX6_MIN;
     FT_Pos      min_y = FX6_MAX;
@@ -311,31 +321,12 @@ position_glyphs(Layout *ftext)
     for (i = 0; i != n_glyphs; ++i) {
         slot = &glyph_array[i];
         glyph = slot->glyph;
-
-        pen2.x = pen1.x;
-        pen2.y = pen1.y;
-        pen1.x = pen.x;
-        pen1.y = pen.y;
         glyph_width = glyph->width;
         glyph_height = glyph->height;
 
         /*
          * Do size calculations for the glyph
          */
-        if (use_kerning) {
-            kerning.x = slot->kerning.x;
-            kerning.y = slot->kerning.y;
-            if (rotation_angle != 0) {
-                FT_Vector_Rotate(&kerning, rotation_angle);
-            }
-            pen.x += FX6_ROUND(kerning.x);
-            pen.y += FX6_ROUND(kerning.y);
-            if (FT_Vector_Length(&pen2) > FT_Vector_Length(&pen)) {
-                pen.x = pen2.x;
-                pen.y = pen2.y;
-            }
-        }
-
         metrics = vertical ? &glyph->v_metrics : &glyph->h_metrics;
         if (metrics->bearing_rotated.y > top) {
             top = metrics->bearing_rotated.y;
@@ -347,7 +338,7 @@ position_glyphs(Layout *ftext)
             max_x = pen.x + metrics->bearing_rotated.x + glyph_width;
         }
         slot->posn.x = pen.x + metrics->bearing_rotated.x;
-        pen.x += metrics->advance_rotated.x;
+        pen.x += vertical ? slot->v_advance.x : slot->h_advance.x;
         if (vertical) {
             if (pen.y + metrics->bearing_rotated.y < min_y) {
                 min_y = pen.y + metrics->bearing_rotated.y;
@@ -356,7 +347,7 @@ position_glyphs(Layout *ftext)
                 max_y = pen.y + metrics->bearing_rotated.y + glyph_height;
             }
             slot->posn.y = pen.y + metrics->bearing_rotated.y;
-            pen.y += metrics->advance_rotated.y;
+            pen.y -= slot->v_advance.y ;
         }
         else {
             if (pen.y - metrics->bearing_rotated.y < min_y) {
@@ -366,7 +357,7 @@ position_glyphs(Layout *ftext)
                 max_y = pen.y - metrics->bearing_rotated.y + glyph_height;
             }
             slot->posn.y = pen.y - metrics->bearing_rotated.y;
-            pen.y -= metrics->advance_rotated.y;
+            pen.y -= slot->h_advance.y;
         }
 
     }
@@ -467,17 +458,18 @@ fill_text_bounding_box(Layout *ftext,
 }
 
 int _PGFT_GetMetrics(FreeTypeInstance *ft, PgFontObject *fontobj,
-                    PGFT_char character, const FontRenderMode *mode,
-                    FT_UInt *gindex, long *minx, long *maxx,
-                    long *miny, long *maxy,
-                    double *advance_x, double *advance_y)
+                    const FontRenderMode *mode, FT_UInt *gindex,
+                    long *minx, long *maxx, long *miny, long *maxy,
+                    double *advance_x, double *advance_y, raqm_glyph_t glyphs)
 {
     FontCache *cache = &(fontobj->_internals->glyph_cache);
-    FT_UInt32 ch = (FT_UInt32)character;
     GlyphIndex_t id;
     FontGlyph *glyph = 0;
     TextContext context;
     FT_Face     font;
+    FT_Vector h_advance;
+    Layout *ftext = &fontobj->_internals->active_text;
+    FT_Angle rotation_angle = ftext->mode.rotation_angle;
 
     /* load our sized font */
     font = _PGFT_GetFontSized(ft, fontobj, mode->face_size);
@@ -489,7 +481,7 @@ int _PGFT_GetMetrics(FreeTypeInstance *ft, PgFontObject *fontobj,
     _PGFT_Cache_Cleanup(cache);
 
     fill_context(&context, ft, fontobj, mode, font);
-    id = FTC_CMapCache_Lookup(context.charmap, context.id, -1, ch);
+    id = glyphs.index;
     if (!id) {
         return -1;
     }
@@ -497,14 +489,19 @@ int _PGFT_GetMetrics(FreeTypeInstance *ft, PgFontObject *fontobj,
     if (!glyph) {
         return -1;
     }
+    h_advance.x = glyphs.x_advance;
+    h_advance.y = 0 ;
+    if (rotation_angle != 0) {
+        FT_Vector_Rotate(&h_advance, rotation_angle);
+    }
 
     *gindex = id;
     *minx = (long)glyph->image->left;
     *maxx = (long)(glyph->image->left + glyph->image->bitmap.width);
     *maxy = (long)glyph->image->top;
     *miny = (long)(glyph->image->top - glyph->image->bitmap.rows);
-    *advance_x = (double)(glyph->h_metrics.advance_rotated.x / 64.0);
-    *advance_y = (double)(glyph->h_metrics.advance_rotated.y / 64.0);
+    *advance_x = (double)(h_advance.x / 64.0);
+    *advance_y = (double)(h_advance.y / 64.0);
 
     return 0;
 }
@@ -529,8 +526,6 @@ _PGFT_LoadGlyph(FontGlyph *glyph, GlyphIndex_t id,
     /* FT_Matrix transform; */
     FT_Vector h_bearing_rotated;
     FT_Vector v_bearing_rotated;
-    FT_Vector h_advance_rotated;
-    FT_Vector v_advance_rotated;
 
     FT_Error error = 0;
 
@@ -605,16 +600,6 @@ _PGFT_LoadGlyph(FontGlyph *glyph, GlyphIndex_t id,
     /* Fill the glyph */
     ft_metrics = &context->font->glyph->metrics;
 
-    h_advance_rotated.x = ft_metrics->horiAdvance + strong_delta.x;
-    h_advance_rotated.y = 0;
-    v_advance_rotated.x = 0;
-    v_advance_rotated.y = ft_metrics->vertAdvance + strong_delta.y;
-    if (rotation_angle != 0) {
-        FT_Angle counter_rotation = INT_TO_FX6(360) - rotation_angle;
-
-        FT_Vector_Rotate(&h_advance_rotated, rotation_angle);
-        FT_Vector_Rotate(&v_advance_rotated, counter_rotation);
-    }
 
     glyph->image = (FT_BitmapGlyph)image;
     glyph->width = INT_TO_FX6(glyph->image->bitmap.width);
@@ -624,11 +609,12 @@ _PGFT_LoadGlyph(FontGlyph *glyph, GlyphIndex_t id,
     fill_metrics(&glyph->h_metrics,
                  ft_metrics->horiBearingX,
                  ft_metrics->horiBearingY,
-                 &h_bearing_rotated, &h_advance_rotated);
+                 &h_bearing_rotated);
 
     if (rotation_angle == 0) {
-        v_bearing_rotated.x = ft_metrics->vertBearingX - strong_delta.x / 2;
-        v_bearing_rotated.y = ft_metrics->vertBearingY;
+        v_bearing_rotated.x = -strong_delta.x / 2;
+        v_bearing_rotated.y = 0;
+
     }
     else {
         /*
@@ -647,7 +633,7 @@ _PGFT_LoadGlyph(FontGlyph *glyph, GlyphIndex_t id,
     fill_metrics(&glyph->v_metrics,
                  ft_metrics->vertBearingX,
                  ft_metrics->vertBearingY,
-                 &v_bearing_rotated, &v_advance_rotated);
+                 &v_bearing_rotated);
 
     return 0;
 
@@ -705,15 +691,12 @@ fill_context(TextContext *context,
 static void
 fill_metrics(FontMetrics *metrics,
              FT_Pos bearing_x, FT_Pos bearing_y,
-             FT_Vector *bearing_rotated,
-             FT_Vector *advance_rotated)
+             FT_Vector *bearing_rotated)
 {
     metrics->bearing_x = bearing_x;
     metrics->bearing_y = bearing_y;
     metrics->bearing_rotated.x = bearing_rotated->x;
     metrics->bearing_rotated.y = bearing_rotated->y;
-    metrics->advance_rotated.x = advance_rotated->x;
-    metrics->advance_rotated.y = advance_rotated->y;
 }
 
 static FT_UInt32

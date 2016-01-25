@@ -1467,19 +1467,52 @@ get_metrics(FontRenderMode *render, PgFontObject *font, PGFT_String *text)
     double advance_x;
     double advance_y;
     Py_ssize_t i;
+    Layout *ftext = &font->_internals->active_text;
+    FT_Face face = _PGFT_GetFontSized(font->freetype, font, render->face_size);
+    raqm_t *rq ;
+    raqm_glyph_t *glyphs;
+    size_t  nglyphs;
+
+    rq = raqm_create();
+    if (!rq)
+        goto cleanup;
+    if (!raqm_set_text(rq, data, length))
+        goto cleanup;
+    if (!raqm_set_freetype_face(rq, face))
+        goto cleanup;
+    if (!raqm_set_par_direction(rq, RAQM_DIRECTION_DEFAULT))
+        goto cleanup;
+    if (!raqm_layout(rq))
+        goto cleanup;
+
+    glyphs = raqm_get_glyphs(rq, &nglyphs);
+    if (!glyphs)
+        goto cleanup;
+
+    /* create the text struct */
+    if (nglyphs > ftext->buffer_size) {
+        _PGFT_free(ftext->glyphs);
+        ftext->glyphs = (GlyphSlot *)
+            _PGFT_malloc((size_t)nglyphs * sizeof(GlyphSlot));
+        if (!ftext->glyphs) {
+            PyErr_NoMemory();
+            goto cleanup;
+        }
+        ftext->buffer_size = nglyphs;
+    }
 
     if (!_PGFT_GetFontSized(font->freetype, font, render->face_size)) {
         PyErr_SetString(PyExc_SDLError, _PGFT_GetError(font->freetype));
-        return 0;
+        goto cleanup;
     }
     list = PyList_New(length);
     if (!list) {
-        return 0;
+        goto cleanup;
     }
-    for (i = 0; i < length; ++i) {
-        if (_PGFT_GetMetrics(font->freetype, font, data[i], render,
+    for (i = 0; i < nglyphs; ++i) {
+        if (_PGFT_GetMetrics(font->freetype, font, render,
                              &gindex, &minx, &maxx, &miny, &maxy,
-                             &advance_x, &advance_y) == 0) {
+                             &advance_x, &advance_y, glyphs[i]) == 0) {
             if (gindex == 0) {
                 Py_INCREF(Py_None);
                 item = Py_None;
@@ -1490,7 +1523,7 @@ get_metrics(FontRenderMode *render, PgFontObject *font, PGFT_String *text)
             }
             if (!item) {
                 Py_DECREF(list);
-                return 0;
+                goto cleanup;
             }
         }
         else {
@@ -1499,8 +1532,16 @@ get_metrics(FontRenderMode *render, PgFontObject *font, PGFT_String *text)
         }
         PyList_SET_ITEM(list, i, item);
     }
+    ftext->length = nglyphs;
+    raqm_destroy(rq);
 
     return list;
+    /*
+     * Cleanup on error
+     */
+cleanup:
+    raqm_destroy(rq);
+    return 0;
 }
 
 static PyObject *

@@ -45,7 +45,7 @@ class DependencyProg:
                       os.popen(command + ' --cflags').readlines() +
                       os.popen(command + ' --libs').readlines())
             flags = ' '.join(config[1:]).split()
-
+  	
             # remove this GNU_SOURCE if there... since python has it already,
             #   it causes a warning.
             if '-D_GNU_SOURCE=1' in flags:
@@ -192,6 +192,7 @@ def main():
         FFMPEGDependency('AVFORMAT', 'libavformat/avformat.h', 'libavformat.a', ['avformat'], ['/include', '/include/ffmpeg']),
         FFMPEGDependency('SWSCALE', 'libswscale/swscale.h', 'libswscale.a', ['swscale'], ['/include', '/include/ffmpeg']),
         DependencyProg('FREETYPE', 'FREETYPE_CONFIG', 'freetype-config', '2.0', ['freetype'], '--ftversion'),
+        DependencyProg('RAQM', '', 'pkg-config raqm', '0.1.0', ['raqm'], '--modversion'),
         #Dependency('GFX', 'SDL_gfxPrimitives.h', 'libSDL_gfx.so', ['SDL_gfx']),
     ]
     if not DEPS[0].found:

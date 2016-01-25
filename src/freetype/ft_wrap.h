@@ -24,6 +24,7 @@
 #define PYGAME_FREETYPE_INTERNAL
 #include "../_pygame.h"
 #include "../freetype.h"
+#include <raqm.h>
 
 
 /**********************************************************
@@ -143,7 +144,6 @@ typedef struct fontmetrics_ {
     FT_Pos bearing_x;
     FT_Pos bearing_y;
     FT_Vector bearing_rotated;
-    FT_Vector advance_rotated;
 } FontMetrics;
 
 typedef struct fontglyph_ {
@@ -159,7 +159,9 @@ typedef struct glyphslot_ {
     GlyphIndex_t id;
     FontGlyph *glyph;
     FT_Vector posn;
-    FT_Vector kerning;
+    FT_Vector offset;
+    FT_Vector h_advance;
+    FT_Vector v_advance;
 } GlyphSlot;
 
 typedef struct layout_ {
@@ -292,10 +294,9 @@ void _PGFT_UnloadFont(FreeTypeInstance *, PgFontObject *);
 int _PGFT_GetTextRect(FreeTypeInstance *, PgFontObject *,
                       const FontRenderMode *, PGFT_String *,
                       SDL_Rect *);
-int _PGFT_GetMetrics(FreeTypeInstance *, PgFontObject *,
-                     PGFT_char, const FontRenderMode *,
+int _PGFT_GetMetrics(FreeTypeInstance *, PgFontObject *, const FontRenderMode *,
                      FT_UInt *, long *, long *, long *, long *,
-                     double *, double *);
+                     double *, double *, raqm_glyph_t);
 void _PGFT_GetRenderMetrics(const FontRenderMode *, Layout *,
                             unsigned *, unsigned *, FT_Vector *,
                             FT_Pos *, FT_Fixed *);
